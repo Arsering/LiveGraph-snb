@@ -240,6 +240,7 @@ namespace livegraph
         const char *get_data() const { return data; }
 
         char *get_data() { return data; }
+        size_t get_data_gbp() { return sizeof(EdgeBlockHeader); }
 
         size_t get_num_entries() const { return tail.data.num_entries; }
 
@@ -260,6 +261,13 @@ namespace livegraph
                 block_size -= block_size >> BLOOM_FILTER_PORTION;
             return (EdgeEntry *)((uint8_t *)this + block_size);
         }
+        size_t get_entries_gbp()
+        {
+            size_t block_size = get_block_size();
+            if (get_order() >= BLOOM_FILTER_THRESHOLD)
+                block_size -= block_size >> BLOOM_FILTER_PORTION;
+            return block_size;
+        }
 
         const BloomFilter get_bloom_filter() const
         {
@@ -276,6 +284,9 @@ namespace livegraph
                 return BloomFilter();
             size_t block_size = get_block_size();
             size_t bloom_filter_size = block_size >> BLOOM_FILTER_PORTION;
+            // GBPLOG << (uintptr_t)(((uint8_t *)this) + block_size - bloom_filter_size) << " " << bloom_filter_size <<
+            // " "
+            //        << get_order() - BLOOM_FILTER_PORTION;
             return BloomFilter(get_order() - BLOOM_FILTER_PORTION, ((uint8_t *)this) + block_size - bloom_filter_size);
         }
 
@@ -374,7 +385,8 @@ namespace livegraph
 
     private:
         timestamp_t committed_time;
-        union alignas(16) Int128Union {
+        union alignas(16) Int128Union
+        {
             struct
             {
                 size_t num_entries;

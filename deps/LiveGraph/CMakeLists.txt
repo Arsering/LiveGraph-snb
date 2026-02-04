@@ -32,7 +32,11 @@ include_directories(${PROJECT_SOURCE_DIR})
 add_library(corelib OBJECT
     src/graph.cpp
     src/transaction.cpp)
-target_link_libraries(corelib OpenMP::OpenMP_CXX)
+target_link_libraries(corelib 
+    OpenMP::OpenMP_CXX  # ① 没有显式修饰符，默认继承前一个修饰符（此处前面无修饰符，视为 PUBLIC）
+    gocache_lib         # ③ 被 PRIVATE 修饰
+)
+
 
 set(BUILD_SHARED_LIVEGRAPH OFF CACHE BOOL "Build Shared LiveGraph.")
 if(BUILD_SHARED_LIVEGRAPH)

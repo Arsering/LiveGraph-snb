@@ -97,6 +97,7 @@ bool Transaction::del_edge(vertex_t src, label_t label, vertex_t dst)
 }
 
 std::string_view Transaction::get_vertex(vertex_t vertex_id) { return txn->get_vertex(vertex_id); }
+std::string_view Transaction::get_vertex_gbp(vertex_t vertex_id) { return txn->get_vertex_gbp(vertex_id); }
 
 std::string_view Transaction::get_edge(vertex_t src, label_t label, vertex_t dst)
 {

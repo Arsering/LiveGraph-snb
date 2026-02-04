@@ -104,8 +104,219 @@ namespace livegraph
         bool del_edge(vertex_t src, label_t label, vertex_t dst);
 
         std::string_view get_vertex(vertex_t vertex_id);
+
+        size_t get_vertex_gbp(vertex_t vertex_id);
+        template <typename T> std::pair<T, gbp::BufferBlock> get_vertex_with_data_gbp(vertex_t vertex_id)
+        {
+            auto addr = get_vertex_gbp(vertex_id);
+            auto schema_buf = getBufferBlock(addr, sizeof(T));
+            auto schema = schema_buf.GetInnerObj<T>();
+
+            return {schema, getBufferBlock(addr, schema.length + offsetof(T, data))};
+        }
+        template <typename T> std::pair<T, size_t> get_vertex_without_data_gbp(vertex_t vertex_id)
+        {
+            auto addr = get_vertex_gbp(vertex_id);
+            auto schema_buf = getBufferBlock(addr, sizeof(T));
+            return {schema_buf.GetInnerObj<T>(), addr};
+        }
+
+        template <typename T>
+        std::pair<std::vector<T>, std::vector<gbp::BufferBlock>>
+        get_vertex_with_data_gbp(std::vector<vertex_t> &vertex_ids)
+        {
+            check_valid();
+            std::vector<gbp::BufferBlock> ret;
+
+            std::vector<std::pair<size_t, bool>> pointer_infos;
+            pointer_infos.resize(vertex_ids.size(), {graph.block_manager.NULLPOINTER, false});
+
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                auto vertex_id = vertex_ids[idx];
+
+                if (vertex_id >= graph.vertex_id.load(std::memory_order_relaxed))
+                    assert(false);
+
+                uintptr_t pointer;
+                if (batch_update || !trace_cache)
+                {
+                    pointer = graph.vertex_ptrs[vertex_id];
+                }
+                else
+                {
+                    auto cache_iter = vertex_ptr_cache.find(vertex_id);
+                    if (cache_iter != vertex_ptr_cache.end())
+                        pointer = cache_iter->second;
+                    else
+                        pointer = graph.vertex_ptrs[vertex_id];
+                }
+                pointer_infos[idx].first = pointer;
+            }
+
+            bool success_mark;
+            do
+            {
+                success_mark = true;
+                std::vector<gbp::batch_request_type> blk_infos;
+                for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+                {
+                    if (pointer_infos[idx].second || pointer_infos[idx].first == graph.block_manager.NULLPOINTER)
+                    {
+                        pointer_infos[idx].second = true;
+                        continue;
+                    }
+                    blk_infos.emplace_back(
+                        pointer_infos[idx].first,
+                        std::max(gbp::PAGE_SIZE_MEMORY - pointer_infos[idx].first % gbp::PAGE_SIZE_MEMORY,
+                                 sizeof(VertexBlockHeader)),
+                        0);
+                }
+                ret.clear();
+                getBufferBlockBatch(blk_infos, ret);
+
+                size_t ret_cursor = 0;
+                for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+                {
+                    if (pointer_infos[idx].second)
+                    {
+                        continue;
+                    }
+
+                    auto vertex_block = ret[ret_cursor++].GetInnerObj<VertexBlockHeader>();
+                    if (cmp_timestamp(vertex_block.get_creation_time_pointer(), read_epoch_id, local_txn_id) <= 0)
+                    {
+                        pointer_infos[idx].second = true;
+                        continue;
+                    }
+                    pointer_infos[idx].first = vertex_block.get_prev_pointer();
+                    success_mark = false;
+                }
+            } while (!success_mark);
+
+            std::vector<gbp::batch_request_type> blk_infos;
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                blk_infos.emplace_back(pointer_infos[idx].first + sizeof(VertexBlockHeader), sizeof(T), 0);
+            }
+            ret.clear();
+            getBufferBlockBatch(blk_infos, ret);
+
+            blk_infos.clear();
+            std::vector<T> schemas;
+            schemas.resize(vertex_ids.size());
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                schemas[idx] = ret[idx].GetInnerObj<T>();
+                blk_infos.emplace_back(pointer_infos[idx].first + sizeof(VertexBlockHeader),
+                                       schemas[idx].length + offsetof(T, data), 0);
+            }
+            ret.clear();
+            getBufferBlockBatch(blk_infos, ret);
+
+            return {schemas, ret};
+        }
+
+        template <typename T>
+        std::pair<std::vector<T>, std::vector<uintptr_t>> get_vertex_without_data_gbp(std::vector<vertex_t> &vertex_ids)
+        {
+            check_valid();
+            std::vector<gbp::BufferBlock> ret;
+
+            std::vector<size_t> pointers;
+            std::vector<bool> marks;
+            pointers.resize(vertex_ids.size(), graph.block_manager.NULLPOINTER);
+            marks.resize(vertex_ids.size(), false);
+
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                auto vertex_id = vertex_ids[idx];
+
+                if (vertex_id >= graph.vertex_id.load(std::memory_order_relaxed))
+                    assert(false);
+
+                uintptr_t pointer;
+                if (batch_update || !trace_cache)
+                {
+                    pointer = graph.vertex_ptrs[vertex_id];
+                }
+                else
+                {
+                    auto cache_iter = vertex_ptr_cache.find(vertex_id);
+                    if (cache_iter != vertex_ptr_cache.end())
+                        pointer = cache_iter->second;
+                    else
+                        pointer = graph.vertex_ptrs[vertex_id];
+                }
+                pointers[idx] = pointer;
+            }
+
+            bool success_mark;
+            do
+            {
+                success_mark = true;
+                std::vector<gbp::batch_request_type> blk_infos;
+                for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+                {
+                    if (marks[idx] || pointers[idx] == graph.block_manager.NULLPOINTER)
+                    {
+                        marks[idx] = true;
+                        continue;
+                    }
+                    blk_infos.emplace_back(pointers[idx],
+                                           std::max(gbp::PAGE_SIZE_MEMORY - pointers[idx] % gbp::PAGE_SIZE_MEMORY,
+                                                    sizeof(VertexBlockHeader)),
+                                           0);
+                }
+                ret.clear();
+                getBufferBlockBatch(blk_infos, ret);
+
+                size_t ret_cursor = 0;
+                for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+                {
+                    if (marks[idx])
+                    {
+                        continue;
+                    }
+
+                    auto vertex_block = ret[ret_cursor++].GetInnerObj<VertexBlockHeader>();
+                    if (cmp_timestamp(vertex_block.get_creation_time_pointer(), read_epoch_id, local_txn_id) <= 0)
+                    {
+                        marks[idx] = true;
+                        continue;
+                    }
+                    pointers[idx] = vertex_block.get_prev_pointer();
+                    success_mark = false;
+                }
+            } while (!success_mark);
+
+            std::vector<gbp::batch_request_type> blk_infos;
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                pointers[idx] += sizeof(VertexBlockHeader);
+                blk_infos.emplace_back(pointers[idx], sizeof(T), 0);
+            }
+            ret.clear();
+            getBufferBlockBatch(blk_infos, ret);
+
+            blk_infos.clear();
+            std::vector<T> schemas;
+            schemas.resize(vertex_ids.size());
+            for (size_t idx = 0; idx < vertex_ids.size(); idx++)
+            {
+                schemas[idx] = ret[idx].GetInnerObj<T>();
+            }
+
+            return {schemas, pointers};
+        }
+
         std::string_view get_edge(vertex_t src, label_t label, vertex_t dst);
+        std::string get_edge_gbp(vertex_t src, label_t label, vertex_t dst);
+        std::vector<std::string> get_edge_gbp(std::vector<std::tuple<vertex_t, label_t, bool>> &edge_infos);
+
         EdgeIterator get_edges(vertex_t src, label_t label, bool reverse = false);
+        EdgeIterator_gbp get_edges_gbp(vertex_t src, label_t label, bool reverse = false);
+        std::vector<EdgeIterator_gbp> get_edges_gbp(std::vector<std::tuple<vertex_t, label_t, bool>> &edgelist_infos);
 
         timestamp_t commit(bool wait_visable = true);
         void abort();
@@ -198,6 +409,7 @@ namespace livegraph
         {
             if (batch_update || !trace_cache)
                 return edge_block->get_num_entries_data_length_atomic();
+            assert(false);
             auto iter = edge_block_num_entries_data_length_cache.find(edge_block);
             if (iter == edge_block_num_entries_data_length_cache.end())
                 return edge_block->get_num_entries_data_length_atomic();
@@ -217,6 +429,8 @@ namespace livegraph
         find_edge(vertex_t dst, EdgeBlockHeader *edge_block, size_t num_entries, size_t data_length);
 
         uintptr_t locate_edge_block(vertex_t src, label_t label);
+        uintptr_t locate_edge_block_gbp(vertex_t src, label_t label);
+        std::vector<uintptr_t> locate_edge_block_gbp(std::vector<std::pair<vertex_t, label_t>> &edgelist_infos);
 
         void update_edge_label_block(vertex_t src, label_t label, uintptr_t edge_block_pointer);
 

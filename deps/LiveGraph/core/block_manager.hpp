@@ -27,7 +27,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "blocks.hpp"
 #include "types.hpp"
+#include "utils.hpp"
+
+#include "GoCache/include/buffer_pool_manager.h"
 
 namespace livegraph
 {
@@ -55,7 +59,17 @@ namespace livegraph
             }
             else
             {
+                // auto chunk_num = chunk_file(path, path);
+                // mmapped_files_.clear();
+                // mmapped_files_.reserve(chunk_num);
+                // while (chunk_num)
+                // {
+                //     chunk_num--;
+                //     mmapped_files_[chunk_num] = open_new_file(path + "_" + std::to_string(chunk_num), chunk_num);
+                // }
+
                 fd = open(path.c_str(), O_RDWR | O_CREAT, 0640);
+                GBPLOG << path;
                 if (fd == EMPTY_FD)
                     throw std::runtime_error("open block file error.");
 
@@ -96,41 +110,81 @@ namespace livegraph
                 close(fd);
         }
 
-        uintptr_t alloc(order_t order)
+        // uintptr_t alloc(order_t order)
+        // {
+        //     uintptr_t pointer = NULLPOINTER;
+        //     if (order < LARGE_BLOCK_THRESHOLD)
+        //     {
+        //         pointer = pop(free_blocks.local(), order);
+        //     }
+        //     else
+        //     {
+        //         std::lock_guard<std::mutex> lock(mutex);
+        //         pointer = pop(large_free_blocks, order);
+        //     }
+
+        //     if (pointer == NULLPOINTER)
+        //     {
+        //         size_t block_size = 1ul << order;
+        //         do
+        //         {
+        //             pointer = used_size.fetch_add(block_size);
+        //             if (pointer + block_size >= file_size)
+        //             {
+        //                 auto new_file_size = ((pointer + block_size) / FILE_TRUNC_SIZE + 1) * FILE_TRUNC_SIZE;
+        //                 std::lock_guard<std::mutex> lock(mutex);
+        //                 if (new_file_size >= file_size)
+        //                 {
+        //                     if (fd != EMPTY_FD)
+        //                     {
+        //                         if (ftruncate(fd, new_file_size) != 0)
+        //                             throw std::runtime_error("ftruncate block file error.");
+        //                     }
+        //                     file_size = new_file_size;
+        //                 }
+        //             }
+        //             if (pointer / SINGLE_FILE_SIZE != (pointer + block_size) / SINGLE_FILE_SIZE)
+        //             {
+        //                 GBPLOG << "cp";
+        //             }
+        //         } while (pointer / SINGLE_FILE_SIZE != (pointer + block_size) / SINGLE_FILE_SIZE);
+        //     }
+
+        //     return pointer;
+        // }
+
+        uintptr_t alloc(size_t block_size)
         {
             uintptr_t pointer = NULLPOINTER;
-            if (order < LARGE_BLOCK_THRESHOLD)
+            size_t padding_size = 0;
             {
-                pointer = pop(free_blocks.local(), order);
+                if (used_size / gbp::PAGE_SIZE_MEMORY !=
+                    (used_size + sizeof(VertexBlockHeader)) / gbp::PAGE_SIZE_MEMORY)
+                { // 当整个VertexBlockHeader不会在同一个内存页上时
+                    padding_size = gbp::PAGE_SIZE_MEMORY - used_size % gbp::PAGE_SIZE_MEMORY;
+                }
             }
-            else
+            auto order = size_to_order(block_size + padding_size);
+            block_size = 1ul << order;
+
+            pointer = used_size.fetch_add(block_size);
+
+            if (pointer + block_size >= file_size)
             {
+                auto new_file_size = ((pointer + block_size) / FILE_TRUNC_SIZE + 1) * FILE_TRUNC_SIZE;
                 std::lock_guard<std::mutex> lock(mutex);
-                pointer = pop(large_free_blocks, order);
-            }
-
-            if (pointer == NULLPOINTER)
-            {
-                size_t block_size = 1ul << order;
-                pointer = used_size.fetch_add(block_size);
-
-                if (pointer + block_size >= file_size)
+                if (new_file_size >= file_size)
                 {
-                    auto new_file_size = ((pointer + block_size) / FILE_TRUNC_SIZE + 1) * FILE_TRUNC_SIZE;
-                    std::lock_guard<std::mutex> lock(mutex);
-                    if (new_file_size >= file_size)
+                    if (fd != EMPTY_FD)
                     {
-                        if (fd != EMPTY_FD)
-                        {
-                            if (ftruncate(fd, new_file_size) != 0)
-                                throw std::runtime_error("ftruncate block file error.");
-                        }
-                        file_size = new_file_size;
+                        if (ftruncate(fd, new_file_size) != 0)
+                            throw std::runtime_error("ftruncate block file error.");
                     }
+                    file_size = new_file_size;
                 }
             }
 
-            return pointer;
+            return pointer + padding_size;
         }
 
         void free(uintptr_t block, order_t order)
@@ -153,15 +207,54 @@ namespace livegraph
             return reinterpret_cast<T *>(reinterpret_cast<char *>(data) + block);
         }
 
+        // template <typename T> inline T *convert(uintptr_t block)
+        // {
+        //     if (__builtin_expect((block == NULLPOINTER), 0))
+        //         return nullptr;
+
+        //     // auto file_id = block / SINGLE_FILE_SIZE;
+        //     auto file_id = block >> SINGLE_FILE_ORDER;
+        //     // auto offset = block % SINGLE_FILE_SIZE;
+        //     auto offset = block & (SINGLE_FILE_SIZE - 1);
+        //     // assert(file_id == 0);
+        //     // assert(mmapped_files_.size() >= file_id);
+
+        //     return reinterpret_cast<T *>(reinterpret_cast<char *>(mmapped_files_[file_id].second) + offset);
+        // }
+
     private:
         const size_t capacity;
         int fd;
         void *data;
+        std::vector<std::pair<int, void *>> mmapped_files_;
         std::mutex mutex;
         tbb::enumerable_thread_specific<std::vector<std::vector<uintptr_t>>> free_blocks;
         std::vector<std::vector<uintptr_t>> large_free_blocks;
         std::atomic<size_t> used_size, file_size;
         uintptr_t null_holder;
+
+        std::pair<int, void *> open_new_file(const std::string &file_path, size_t file_id)
+        {
+            auto fd = open(file_path.c_str(), O_RDWR | O_CREAT, 0640);
+            GBPLOG << file_path;
+            if (fd == EMPTY_FD)
+                throw std::runtime_error("open block file error.");
+
+            auto data = mmap(nullptr, SINGLE_FILE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            GBPLOG << fd << " " << (uintptr_t)data;
+            if (data == MAP_FAILED)
+                throw std::runtime_error("mmap block error.");
+            if (madvise(data, SINGLE_FILE_SIZE, MADV_RANDOM) != 0)
+                throw std::runtime_error("madvise block error.");
+            {
+                getDefaultFD(file_id) =
+                    gbp::BufferPoolManager::GetGlobalInstance().OpenFile(file_path, O_RDWR | O_CREAT | O_DIRECT);
+
+                // assert(fd_gbp == 1);
+                // GBPLOG << "The fd in GoCache of file " + graphPath + "/graph.mmap is " << fd_gbp;
+            }
+            return {fd, data};
+        }
 
         uintptr_t pop(std::vector<std::vector<uintptr_t>> &free_block, order_t order)
         {

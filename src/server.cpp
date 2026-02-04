@@ -13,13 +13,13 @@
 #include <tbb/concurrent_vector.h>
 #include <tbb/parallel_sort.h>
 
-#include <fcntl.h>
-#include <sys/mman.h>
-
 #include "core/import.hpp"
 #include "core/lg.hpp"
 #include "core/schema.hpp"
 #include "core/util.hpp"
+#include <cmath>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include "Interactive.h"
 #include <thrift/concurrency/ThreadFactory.h>
@@ -115,8 +115,9 @@ public:
         }
         size_ = lseek(fd_, 0, SEEK_END);
         data_ = (char *)mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-        if (data_ == MAP_FAILED)
-            throw std::runtime_error("mmap error.");
+        // if (data_ == MAP_FAILED)
+        //     throw std::runtime_error("mmap error.");
+        assert(data_ != MAP_FAILED);
     }
     ~CSVReader()
     {
@@ -126,6 +127,14 @@ public:
 
     std::string GetNextLine()
     {
+        if (cursor_ >= prefetch_block_size * block_cursor_)
+        {
+            size_t offset = std::min(prefetch_block_size * block_cursor_, size_);
+            size_t len = std::min(prefetch_block_size, size_ - offset);
+            assert(madvise(data_ + offset, len, MADV_SEQUENTIAL | MADV_WILLNEED) == 0);
+            // GBPLOG << "cp";
+            block_cursor_++;
+        }
         std::string ret;
         if (cursor_ >= size_)
             return std::string();
@@ -151,6 +160,7 @@ public:
                 return std::string(data_ + start_index, end_index - start_index);
             }
         }
+
         return std::string();
     }
 
@@ -159,6 +169,8 @@ private:
     char *data_;
     size_t cursor_;
     size_t size_;
+    size_t block_cursor_ = 0;
+    const size_t prefetch_block_size = 64 * 1024 * 1024;
 };
 
 // void prepareVIndex(snb::Schema &schema, std::string path)
@@ -441,7 +453,12 @@ void importComment(snb::MessageSchema &commentSchema,
                    snb::PlaceSchema &placeSchema,
                    snb::MessageSchema &postSchema)
 {
+    size_t ts = gbp::CacheInfo::get_time_in_ms();
+
     auto all_messages = parallel_readlines(path + snb::commentPathSuffix);
+    ts = gbp::CacheInfo::get_time_in_ms() - ts;
+    GBPLOG << "Comment time = " << (ts / 1e6);
+    ts = gbp::CacheInfo::get_time_in_ms();
     assert(all_messages[0] ==
            "id|creationDate|locationIP|browserUsed|content|length|creator|place|replyOfPost|replyOfComment");
     std::vector<std::vector<std::string>> message_vs;
@@ -450,11 +467,16 @@ void importComment(snb::MessageSchema &commentSchema,
     {
         message_vs.emplace_back(split(all_messages[i], csv_split));
     }
+    ts = gbp::CacheInfo::get_time_in_ms() - ts;
+    GBPLOG << "Comment time = " << (ts / 1e6);
+    ts = gbp::CacheInfo::get_time_in_ms();
     all_messages.clear();
     tbb::parallel_sort(message_vs.begin(), message_vs.end(),
                        [](const std::vector<std::string> &a, const std::vector<std::string> &b)
                        { return a[1] < b[1]; });
-
+    ts = gbp::CacheInfo::get_time_in_ms() - ts;
+    GBPLOG << "Comment time = " << (ts / 1e6);
+    ts = gbp::CacheInfo::get_time_in_ms();
     std::vector<uint64_t> message_vids(message_vs.size()), creator_vids(message_vs.size()),
         place_vids(message_vs.size());
     std::vector<uint64_t> replyOfPost_vids(message_vs.size()), replyOfComment_vids(message_vs.size());
@@ -468,8 +490,11 @@ void importComment(snb::MessageSchema &commentSchema,
         replyOfPost_vids[i] = !message_v[8].empty() ? postSchema.findId(std::stoull(message_v[8])) : (uint64_t)-1;
         replyOfComment_vids[i] = message_v.size() > 9 ? commentSchema.findId(std::stoull(message_v[9])) : (uint64_t)-1;
     }
-    auto loader = graph->begin_batch_loader();
+    ts = gbp::CacheInfo::get_time_in_ms() - ts;
+    GBPLOG << "Comment time = " << (ts / 1e6);
+    ts = gbp::CacheInfo::get_time_in_ms();
 
+    auto loader = graph->begin_batch_loader();
     for (size_t i = 0; i < message_vs.size(); i++)
     {
         auto &message_v = message_vs[i];
@@ -515,6 +540,9 @@ void importComment(snb::MessageSchema &commentSchema,
         //        std::chrono::system_clock::to_time_t(std::chrono::system_clock::time_point(std::chrono::milliseconds(message->creationDate)));
         //        std::cout << std::ctime(&t);
     }
+    ts = gbp::CacheInfo::get_time_in_ms() - ts;
+    GBPLOG << "Comment time = " << (ts / 1e6);
+    ts = gbp::CacheInfo::get_time_in_ms();
 }
 
 void importTag(snb::TagSchema &tagSchema, std::string path, snb::TagClassSchema &tagclassSchema)
@@ -878,29 +906,44 @@ void signalHandler(int signum)
         ::server->stop();
 }
 
-bool isServerReady(int port)
-{
-    try
-    {
-        std::shared_ptr<TTransport> socket(new TSocket("localhost", port));
-        socket->open(); // 尝试连接服务器端口
-        socket->close();
-        return true; // 连接成功，服务器已就绪
-    }
-    catch (const TTransportException &e)
-    {
-        return false; // 连接失败，服务器未就绪
-    }
-}
+// bool isServerReady(int port)
+// {
+//     try
+//     {
+//         std::shared_ptr<TTransport> socket(new TSocket("localhost", port));
+//         socket->open(); // 尝试连接服务器端口
+//         socket->close();
+//         return true; // 连接成功，服务器已就绪
+//     }
+//     catch (const TTransportException &e)
+//     {
+//         return false; // 连接失败，服务器未就绪
+//     }
+// }
 
 int main(int argc, char **argv)
 {
+    GBPLOG << "cp";
     signal(SIGINT, signalHandler);
     std::string graphPath = argv[1];
     std::string dataPath = argv[2];
     int port = std::stoi(argv[3]);
 
     size_t size = argc <= 4 ? (1lu << 40) : std::stoul(argv[4]);
+
+    // GoCache related code
+    {
+        std::string log_data_path = getenv("LOG_DIR");
+        assert(!log_data_path.empty());
+        gbp::PerformanceLogServer::GetPerformanceLogger().Start(graphPath, log_data_path + "/performance.log");
+
+        auto envValue = getenv("GOCACHE_POOL_SIZE_BYTE");
+        auto pool_size_Byte = std::stoull(envValue);
+        size_t pool_num = 8;
+        size_t io_server_num = 4;
+        gbp::BufferPoolManager::GetGlobalInstance().init(
+            pool_num, std::ceil(pool_size_Byte / gbp::PAGE_SIZE_MEMORY) / pool_num, io_server_num);
+    }
 
     graph = new Graph(graphPath + "/graph.mmap", "", graphPath + "/graph.save", size);
     rocksdb::DB *rocksdb_db;
@@ -961,8 +1004,8 @@ int main(int argc, char **argv)
     column_families.emplace_back("forumSchema_nameidx", name_options);
 
     column_families.emplace_back(rocksdb::kDefaultColumnFamilyName, rocksdb::ColumnFamilyOptions());
-    rocksdb::DB::Open(options, graphPath, column_families, &handles, &rocksdb_db);
-
+    rocksdb::Status status = rocksdb::DB::Open(options, graphPath, column_families, &handles, &rocksdb_db);
+    GBPLOG << status.ToString();
     personSchema = snb::PersonSchema(rocksdb_db, handles[0], handles[1], handles[2]);
     placeSchema = snb::PlaceSchema(rocksdb_db, handles[3], handles[4], handles[5]);
     orgSchema = snb::OrgSchema(rocksdb_db, handles[6], handles[7], handles[8]);
@@ -972,10 +1015,26 @@ int main(int argc, char **argv)
     tagclassSchema = snb::TagClassSchema(rocksdb_db, handles[18], handles[19], handles[20]);
     forumSchema = snb::ForumSchema(rocksdb_db, handles[21], handles[22], handles[23]);
 
-    std::cout << "Start prepareVIndex" << std::endl;
+    auto DateTimeParser = [](std::string str)
+    {
+        auto dateTime = from_time(str);
+        snb::Buffer buf(sizeof(uint64_t));
+        *(uint64_t *)buf.data() =
+            std::chrono::duration_cast<std::chrono::milliseconds>(dateTime.time_since_epoch()).count();
+        return buf;
+    };
 
+    auto YearParser = [](std::string str)
+    {
+        snb::Buffer buf(sizeof(int32_t));
+        *(int32_t *)buf.data() = std::stoi(str);
+        return buf;
+    };
+
+    std::cout << "Start prepareVIndex" << std::endl;
     if (graph->get_max_vertex_id() == 0)
     {
+        size_t ts = gbp::CacheInfo::get_time_in_ms();
         {
             std::vector<std::thread> pool;
             pool.emplace_back(prepareVIndex, std::ref(personSchema), dataPath + snb::personPathSuffix);
@@ -989,9 +1048,10 @@ int main(int argc, char **argv)
             for (auto &t : pool)
                 t.join();
         }
-
+        ts = gbp::CacheInfo::get_time_in_ms() - ts;
+        GBPLOG << "Time = " << (ts / 1e6);
         std::cout << "Start Vertex Loading" << std::endl;
-
+        ts = gbp::CacheInfo::get_time_in_ms();
         {
             std::vector<std::thread> pool;
             pool.emplace_back(importPerson, std::ref(personSchema), dataPath, std::ref(placeSchema));
@@ -1016,25 +1076,50 @@ int main(int argc, char **argv)
             for (auto &t : pool)
                 t.join();
         }
+        ts = gbp::CacheInfo::get_time_in_ms() - ts;
+        GBPLOG << "Time = " << (ts / 1e6);
+        // {
+        //     importPerson(std::ref(personSchema), dataPath, std::ref(placeSchema));
+        //     GBPLOG << "cp";
+
+        //     importPlace(std::ref(placeSchema), dataPath);
+        //     GBPLOG << "cp";
+
+        //     importOrg(std::ref(orgSchema), dataPath, std::ref(placeSchema));
+        //     GBPLOG << "cp";
+
+        //     importPost(std::ref(postSchema), dataPath, std::ref(personSchema), std::ref(forumSchema),
+        //                std::ref(placeSchema));
+        //     GBPLOG << "cp";
+
+        //     importComment(std::ref(commentSchema), dataPath, std::ref(personSchema), std::ref(placeSchema),
+        //                   std::ref(postSchema));
+        //     GBPLOG << "cp";
+
+        //     importTag(std::ref(tagSchema), dataPath, std::ref(tagclassSchema));
+        //     GBPLOG << "cp";
+
+        //     importTagClass(std::ref(tagclassSchema), dataPath);
+        //     GBPLOG << "cp";
+
+        //     importForum(std::ref(forumSchema), dataPath, std::ref(personSchema));
+        //     GBPLOG << "cp";
+        //     importRawEdge(std::ref(personSchema), std::ref(tagSchema), snb::EdgeSchema::Person2Tag,
+        //                   snb::EdgeSchema::Tag2Person, dataPath + snb::personHasInterestPathSuffix);
+        //     GBPLOG << "cp";
+        //     importRawEdge(std::ref(postSchema), std::ref(tagSchema), snb::EdgeSchema::Post2Tag,
+        //                   snb::EdgeSchema::Tag2Post, dataPath + snb::postHasTagPathSuffix);
+        //     GBPLOG << "cp";
+        //     importRawEdge(std::ref(commentSchema), std::ref(tagSchema), snb::EdgeSchema::Comment2Tag,
+        //                   snb::EdgeSchema::Tag2Comment, dataPath + snb::commentHasTagPathSuffix);
+        //     GBPLOG << "cp";
+        //     importRawEdge(std::ref(forumSchema), std::ref(tagSchema), snb::EdgeSchema::Forum2Tag,
+        //                   snb::EdgeSchema::Tag2Forum, dataPath + snb::forumHasTagPathSuffix);
+        // }
         {
             std::vector<std::thread> pool;
 
-            auto DateTimeParser = [](std::string str)
-            {
-                auto dateTime = from_time(str);
-                snb::Buffer buf(sizeof(uint64_t));
-                *(uint64_t *)buf.data() =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(dateTime.time_since_epoch()).count();
-                return buf;
-            };
-
-            auto YearParser = [](std::string str)
-            {
-                snb::Buffer buf(sizeof(int32_t));
-                *(int32_t *)buf.data() = std::stoi(str);
-                return buf;
-            };
-
+            ts = gbp::CacheInfo::get_time_in_ms();
             std::cout << "Start Edge Loading" << std::endl;
 
             //            pool.emplace_back(importDataEdge, std::ref(forumSchema),  std::ref(personSchema),
@@ -1043,6 +1128,7 @@ int main(int argc, char **argv)
             //            pool.emplace_back(importDataEdge, std::ref(personSchema), std::ref(personSchema),
             //            snb::EdgeSchema::Person2Person,       snb::EdgeSchema::Person2Person,
             //                    dataPath+snb::personKnowsPersonPathSuffix, DateTimeParser, true);
+
             pool.emplace_back(importDataEdge, std::ref(personSchema), std::ref(postSchema),
                               snb::EdgeSchema::Person2Post_like, snb::EdgeSchema::Post2Person_like,
                               dataPath + snb::personLikePostPathSuffix, DateTimeParser, true);
@@ -1059,23 +1145,60 @@ int main(int argc, char **argv)
             pool.emplace_back(importKnows, dataPath + snb::personKnowsPersonPathSuffix);
             for (auto &t : pool)
                 t.join();
+            ts = gbp::CacheInfo::get_time_in_ms() - ts;
+            GBPLOG << "Time = " << (ts / 1e6);
         }
-
         std::cout << "Finish importing" << std::endl;
+        delete graph;
+        for (auto p : handles)
+        {
+            rocksdb_db->DestroyColumnFamilyHandle(p);
+        }
+        delete rocksdb_db;
+
+        return 0;
     }
     else
     {
         std::cout << "Finish loading" << std::endl;
     }
 
+    // GoCache related code
+    // {
+    //     auto fd_gbp = gbp::BufferPoolManager::GetGlobalInstance().OpenFile(graphPath + "/graph.mmap",
+    //                                                                        O_RDWR | O_CREAT | O_DIRECT);
+    //     assert(fd_gbp == 1);
+    //     GBPLOG << "The fd in GoCache of file " + graphPath + "/graph.mmap is " << fd_gbp;
+    // }
+
     const int workerCount = std::stoi(std::getenv("LIVEGRAPH_NUM_CLIENTS"));
     std::shared_ptr<ThreadManager> threadManager = ThreadManager::newSimpleThreadManager(workerCount);
     threadManager->threadFactory(std::make_shared<ThreadFactory>());
     threadManager->start();
-    ::server = new TThreadPoolServer(
-        std::make_shared<InteractiveProcessorFactory>(std::make_shared<InteractiveCloneFactory>()),
-        std::make_shared<TServerSocket>(port), std::make_shared<TBufferedTransportFactory>(),
-        std::make_shared<TBinaryProtocolFactory>(), threadManager);
+
+    auto original_processor_factory =
+        std::make_shared<InteractiveProcessorFactory>(std::make_shared<InteractiveCloneFactory>());
+    auto original_buffered_factory = std::make_shared<TBufferedTransportFactory>();
+
+    // 3. 包装为带日志功能的工厂
+    std::string log_data_path = getenv("LOG_DIR");
+    assert(!log_data_path.empty());
+    auto logger = std::make_shared<RPCLogger>(log_data_path + "/query.log");
+
+    auto loggingFactory = std::make_shared<LoggingTransportFactory>(original_buffered_factory, logger);
+    auto replay_factory =
+        std::make_shared<LoggingProcessorFactory<LoggingTransport>>(original_processor_factory, logger);
+
+    // ::server = new TThreadPoolServer(
+    //     std::make_shared<InteractiveProcessorFactory>(std::make_shared<InteractiveCloneFactory>()),
+    //     std::make_shared<TServerSocket>(port), bufferedFactory, std::make_shared<TBinaryProtocolFactory>(),
+    //     threadManager);
+
+    ::server =
+        new TThreadPoolServer(original_processor_factory, std::make_shared<TServerSocket>(port),
+                              original_buffered_factory, std::make_shared<TBinaryProtocolFactory>(), threadManager);
+    // ::server = new TThreadPoolServer(replay_factory, std::make_shared<TServerSocket>(port), loggingFactory,
+    //                                  std::make_shared<TBinaryProtocolFactory>(), threadManager);
 
     // ::server = new TThreadedServer(
     //     std::make_shared<InteractiveProcessorFactory>(std::make_shared<InteractiveCloneFactory>()),

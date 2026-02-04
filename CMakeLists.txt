@@ -21,10 +21,17 @@ else()
 endif()
 
 find_package(PkgConfig)
-pkg_check_modules(THRIFT REQUIRED thrift>=0.13)
+pkg_check_modules(THRIFT REQUIRED thrift>0.15)
+# find_package(Thrift 0.20.0 REQUIRED)
+
+# pkg_check_modules(THRIFT REQUIRED libthrift)
+
 include_directories(${THRIFT_INCLUDE_DIRS})
 link_directories(${THRIFT_LIBRARY_DIRS})
 add_definitions(${THRIFT_CFLAGS_OTHER})
+
+add_subdirectory(deps/GoCache)
+
 
 set(THRIFT_GEN_PATH ${CMAKE_BINARY_DIR}/gen-cpp)
 set(THRIFT_CODE_PATH ${CMAKE_SOURCE_DIR}/thrift)
@@ -32,8 +39,8 @@ set(ROCKSDB_CODE_PATH ${CMAKE_SOURCE_DIR}/deps/rocksdb)
 set(LIVEGRAPH_CODE_PATH ${CMAKE_SOURCE_DIR}/deps/LiveGraph)
 add_custom_command(
 OUTPUT
-    ${THRIFT_GEN_PATH}/interactive_constants.cpp
-    ${THRIFT_GEN_PATH}/interactive_constants.h
+    # ${THRIFT_GEN_PATH}/interactive_constants.cpp
+    # ${THRIFT_GEN_PATH}/interactive_constants.h
     ${THRIFT_GEN_PATH}/Interactive.cpp
     ${THRIFT_GEN_PATH}/Interactive.h
     ${THRIFT_GEN_PATH}/interactive_types.cpp
@@ -51,6 +58,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING
       "Choose the type of build, options are: Debug Release RelWithDebInfo MinSizeRel." FORCE)
 endif(NOT CMAKE_BUILD_TYPE)
+
 
 include(ExternalProject)
 ExternalProject_Add(
@@ -82,7 +90,7 @@ endif()
 add_subdirectory(${PROJECT_DEPS_DIR}/LiveGraph)
 
 aux_source_directory(src SOURCES)
-add_executable(snb_server ${SOURCES} ${THRIFT_GEN_PATH}/interactive_constants.cpp ${THRIFT_GEN_PATH}/Interactive.cpp ${THRIFT_GEN_PATH}/interactive_types.cpp)
+add_executable(snb_server ${SOURCES}  ${THRIFT_GEN_PATH}/Interactive.cpp ${THRIFT_GEN_PATH}/interactive_types.cpp)
 
 #remove deprecated warning
 target_compile_definitions(snb_server PRIVATE -DHAS_UNCAUGHT_EXCEPTIONS=1)

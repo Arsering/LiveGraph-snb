@@ -18,11 +18,16 @@
 #include <cstddef>
 #include <cstdint>
 
+#define GOCACHE_ENABLED true
+#define GOCACHE_BATCH_IO_ENABLED false
+
 namespace livegraph
 {
     using label_t = uint16_t;
     using vertex_t = uint64_t;
     using order_t = uint8_t;
     using timestamp_t = int64_t;
+    constexpr static size_t SINGLE_FILE_ORDER = 31;
+    constexpr static size_t SINGLE_FILE_SIZE = 1ul << SINGLE_FILE_ORDER; // 32GB
 
 } // namespace livegraph

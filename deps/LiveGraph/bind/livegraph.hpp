@@ -15,11 +15,12 @@
 
 #pragma once
 
+#include "../../GoCache/include/buffer_pool_manager.h"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <stdexcept>
+#include <string>
 
 namespace livegraph
 {
@@ -84,6 +85,8 @@ namespace lg
         bool del_edge(vertex_t src, label_t label, vertex_t dst);
 
         std::string_view get_vertex(vertex_t vertex_id);
+        std::string_view get_vertex_gbp(vertex_t vertex_id);
+
         std::string_view get_edge(vertex_t src, label_t label, vertex_t dst);
         EdgeIterator get_edges(vertex_t src, label_t label, bool reverse = false);
 

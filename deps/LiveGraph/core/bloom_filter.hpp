@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "utils.hpp"
 #include <immintrin.h>
 
 namespace livegraph
@@ -56,7 +57,12 @@ namespace livegraph
 
         bool valid() const { return log_num_buckets != 0; }
 
-        void clear() { memset(directory, 0, (1ul << log_num_buckets) * sizeof(bucket_t)); }
+        void clear()
+        {
+            // GBPLOG << (uintptr_t)directory << " " << (1ul << log_num_buckets) * sizeof(bucket_t) << " "
+            //        << log_num_buckets;
+            memset(directory, 0, (1ul << log_num_buckets) * sizeof(bucket_t));
+        }
 
         size_t size() const
         {
